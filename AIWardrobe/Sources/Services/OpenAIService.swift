@@ -1,5 +1,6 @@
 import Foundation
 import UIKit
+import Network
 
 enum OpenAIError: Error {
     case invalidAPIKey
@@ -16,16 +17,45 @@ class OpenAIService {
     private let visionModel = "gpt-4o"
     private let chatModel = "gpt-4o"
     private let baseURL = "https://api.openai.com/v1"
+    private let urlSession: URLSession
+    private let requestQueue = DispatchQueue(label: "openai.requests", qos: .userInitiated)
+    private var activeRequests = 0
+    private let maxConcurrentRequests = 2
+    private let networkMonitor = NWPathMonitor()
     
     private init() {
         self.apiKey = Config.openAIAPIKey
+        
+        // Configure URLSession for better network handling
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 60.0
+        config.timeoutIntervalForResource = 120.0
+        config.waitsForConnectivity = true
+        config.allowsCellularAccess = true
+        config.allowsExpensiveNetworkAccess = true
+        config.allowsConstrainedNetworkAccess = true
+        
+        self.urlSession = URLSession(configuration: config)
+        
+        // Start network monitoring
+        networkMonitor.start(queue: requestQueue)
+    }
+    
+    /// Check if network is available
+    private func isNetworkAvailable() -> Bool {
+        return networkMonitor.currentPath.status == .satisfied
     }
     
     // MARK: - Image Analysis
     
     /// Analyzes a clothing item image and returns detailed JSON description
     func analyzeClothingImage(imageData: Data) async throws -> ClothingDescription {
-        let base64Image = imageData.base64EncodedString()
+        // Optimize image size for API request
+        let optimizedImageData = try optimizeImageForAPI(imageData: imageData)
+        let base64Image = optimizedImageData.base64EncodedString()
+        
+        print("📸 Original image size: \(imageData.count) bytes")
+        print("📸 Optimized image size: \(optimizedImageData.count) bytes")
         
         let systemPrompt = """
         You are a fashion expert analyzing clothing items. Analyze the provided image and return ONLY a valid JSON object with detailed information about the clothing item.
@@ -229,6 +259,59 @@ class OpenAIService {
     
     // MARK: - Private Helper Methods
     
+    /// Optimizes image data for API requests by resizing and compressing
+    private func optimizeImageForAPI(imageData: Data) throws -> Data {
+        guard let image = UIImage(data: imageData) else {
+            throw OpenAIError.decodingError
+        }
+        
+        // Target maximum dimensions (OpenAI recommends max 2048x2048 for vision)
+        let maxDimension: CGFloat = 1024
+        let maxFileSize = 20 * 1024 * 1024 // 20MB limit for OpenAI API
+        
+        // If image is already small enough, return as is
+        if imageData.count <= maxFileSize && 
+           image.size.width <= maxDimension && 
+           image.size.height <= maxDimension {
+            return imageData
+        }
+        
+        // Calculate new size maintaining aspect ratio
+        let aspectRatio = image.size.width / image.size.height
+        var newSize: CGSize
+        
+        if image.size.width > image.size.height {
+            newSize = CGSize(width: maxDimension, height: maxDimension / aspectRatio)
+        } else {
+            newSize = CGSize(width: maxDimension * aspectRatio, height: maxDimension)
+        }
+        
+        // Resize image
+        UIGraphicsBeginImageContextWithOptions(newSize, false, 1.0)
+        image.draw(in: CGRect(origin: .zero, size: newSize))
+        guard let resizedImage = UIGraphicsGetImageFromCurrentImageContext() else {
+            UIGraphicsEndImageContext()
+            throw OpenAIError.decodingError
+        }
+        UIGraphicsEndImageContext()
+        
+        // Compress to JPEG with quality adjustment
+        var compressionQuality: CGFloat = 0.8
+        var compressedData = resizedImage.jpegData(compressionQuality: compressionQuality)
+        
+        // Reduce quality if still too large
+        while let data = compressedData, data.count > maxFileSize && compressionQuality > 0.1 {
+            compressionQuality -= 0.1
+            compressedData = resizedImage.jpegData(compressionQuality: compressionQuality)
+        }
+        
+        guard let finalData = compressedData else {
+            throw OpenAIError.decodingError
+        }
+        
+        return finalData
+    }
+    
     private func makeAPIRequest(endpoint: String, payload: [String: Any]) async throws -> [String: Any] {
         // Validate API key
         guard !apiKey.isEmpty && apiKey != "YOUR_OPENAI_API_KEY_HERE" else {
@@ -242,6 +325,49 @@ class OpenAIService {
             throw OpenAIError.invalidAPIKey
         }
         
+        // Check concurrent request limit
+        return try await withCheckedThrowingContinuation { continuation in
+            requestQueue.async { [weak self] in
+                guard let self = self else {
+                    continuation.resume(throwing: OpenAIError.networkError(URLError(.unknown)))
+                    return
+                }
+                
+                // Wait if too many concurrent requests
+                while self.activeRequests >= self.maxConcurrentRequests {
+                    Thread.sleep(forTimeInterval: 0.1)
+                }
+                
+                self.activeRequests += 1
+                print("🔄 Active OpenAI requests: \(self.activeRequests)")
+                
+                Task {
+                    do {
+                        let result = try await self.performAPIRequest(endpoint: endpoint, payload: payload)
+                        await MainActor.run {
+                            self.activeRequests -= 1
+                            print("✅ OpenAI request completed. Active requests: \(self.activeRequests)")
+                        }
+                        continuation.resume(returning: result)
+                    } catch {
+                        await MainActor.run {
+                            self.activeRequests -= 1
+                            print("❌ OpenAI request failed. Active requests: \(self.activeRequests)")
+                        }
+                        continuation.resume(throwing: error)
+                    }
+                }
+            }
+        }
+    }
+    
+    private func performAPIRequest(endpoint: String, payload: [String: Any]) async throws -> [String: Any] {
+        // Check network availability
+        guard isNetworkAvailable() else {
+            print("❌ No network connection available")
+            throw OpenAIError.networkError(URLError(.notConnectedToInternet))
+        }
+        
         guard let url = URL(string: "\(baseURL)\(endpoint)") else {
             print("❌ Invalid OpenAI API URL: \(baseURL)\(endpoint)")
             throw OpenAIError.networkError(URLError(.badURL))
@@ -251,14 +377,15 @@ class OpenAIService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 60.0 // Set timeout to 60 seconds
         
         do {
             let jsonData = try JSONSerialization.data(withJSONObject: payload)
             request.httpBody = jsonData
             
             print("🌐 Making OpenAI API request to: \(url)")
-            let (data, response) = try await URLSession.shared.data(for: request)
+            print("📦 Request payload size: \(jsonData.count) bytes")
+            
+            let (data, response) = try await urlSession.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
                 print("❌ Invalid HTTP response from OpenAI API")

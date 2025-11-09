@@ -57,14 +57,22 @@ static let openAIAPIKey = "sk-your-actual-api-key-here"
 - Wait a few minutes before trying again
 - Consider upgrading your OpenAI plan for higher rate limits
 
-## Improved Error Handling
+## Improved Error Handling & Network Optimizations
 
-The app now provides better error messages:
+The app now includes several improvements to prevent connection issues:
 
+### Enhanced Error Messages:
 - **Invalid API Key**: "OpenAI API key is not configured. Please update your API key in Config.swift"
 - **Network Issues**: "Cannot connect to OpenAI servers. Please check your API key and network."
 - **Timeout**: "Request timed out. Please try again."
 - **No Internet**: "No internet connection. Please check your network."
+
+### Network Optimizations:
+- **Image Compression**: Images are automatically resized and compressed before sending to reduce payload size
+- **Request Queuing**: Maximum 2 concurrent requests to prevent overwhelming the connection
+- **Network Monitoring**: Checks network availability before making requests
+- **Improved Timeouts**: 60-second request timeout, 120-second resource timeout
+- **Connection Settings**: Optimized for cellular and constrained networks
 
 ## Testing Your Configuration
 

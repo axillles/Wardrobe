@@ -48,19 +48,46 @@ class WardrobeViewModel: ObservableObject {
                 aiDescriptionJSON = aiDescription.jsonString
                 print("✅ AI analysis completed successfully")
             } catch {
-                // If AI analysis fails, continue without it
+                // If AI analysis fails, continue without it but provide better error feedback
                 print("❌ AI analysis failed: \(error)")
+                
+                var userFriendlyMessage = "AI analysis failed"
+                
                 if let openAIError = error as? OpenAIError {
                     switch openAIError {
                     case .invalidAPIKey:
+                        userFriendlyMessage = "OpenAI API key is not configured. Please update your API key in Config.swift"
                         print("⚠️ OpenAI API key is invalid or missing")
                     case .apiError(let message):
+                        userFriendlyMessage = "OpenAI API error: \(message)"
                         print("⚠️ OpenAI API error: \(message)")
                     case .networkError(let netError):
+                        if let urlError = netError as? URLError {
+                            switch urlError.code {
+                            case .notConnectedToInternet:
+                                userFriendlyMessage = "No internet connection. Please check your network."
+                            case .timedOut:
+                                userFriendlyMessage = "Request timed out. Please try again."
+                            case .cannotConnectToHost:
+                                userFriendlyMessage = "Cannot connect to OpenAI servers. Please check your API key and network."
+                            default:
+                                userFriendlyMessage = "Network error: \(urlError.localizedDescription)"
+                            }
+                        } else {
+                            userFriendlyMessage = "Network error: \(netError.localizedDescription)"
+                        }
                         print("⚠️ Network error: \(netError.localizedDescription)")
-                    default:
-                        print("⚠️ Error type: \(openAIError)")
+                    case .decodingError:
+                        userFriendlyMessage = "Failed to process AI response. Please try again."
+                        print("⚠️ Failed to decode AI response")
                     }
+                } else {
+                    userFriendlyMessage = "Unexpected error: \(error.localizedDescription)"
+                }
+                
+                // Set error message for UI display
+                await MainActor.run {
+                    self.errorMessage = userFriendlyMessage
                 }
             }
             

@@ -230,11 +230,20 @@ class OpenAIService {
     // MARK: - Private Helper Methods
     
     private func makeAPIRequest(endpoint: String, payload: [String: Any]) async throws -> [String: Any] {
+        // Validate API key
         guard !apiKey.isEmpty && apiKey != "YOUR_OPENAI_API_KEY_HERE" else {
+            print("❌ OpenAI API key is not configured. Please update Config.swift with your actual API key.")
+            throw OpenAIError.invalidAPIKey
+        }
+        
+        // Validate API key format (should start with sk-)
+        guard apiKey.hasPrefix("sk-") else {
+            print("❌ OpenAI API key format is invalid. It should start with 'sk-'")
             throw OpenAIError.invalidAPIKey
         }
         
         guard let url = URL(string: "\(baseURL)\(endpoint)") else {
+            print("❌ Invalid OpenAI API URL: \(baseURL)\(endpoint)")
             throw OpenAIError.networkError(URLError(.badURL))
         }
         
@@ -242,34 +251,61 @@ class OpenAIService {
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        
-        let jsonData = try JSONSerialization.data(withJSONObject: payload)
-        request.httpBody = jsonData
+        request.timeoutInterval = 60.0 // Set timeout to 60 seconds
         
         do {
+            let jsonData = try JSONSerialization.data(withJSONObject: payload)
+            request.httpBody = jsonData
+            
+            print("🌐 Making OpenAI API request to: \(url)")
             let (data, response) = try await URLSession.shared.data(for: request)
             
             guard let httpResponse = response as? HTTPURLResponse else {
+                print("❌ Invalid HTTP response from OpenAI API")
                 throw OpenAIError.networkError(URLError(.badServerResponse))
             }
             
+            print("📡 OpenAI API response status: \(httpResponse.statusCode)")
+            
             guard (200...299).contains(httpResponse.statusCode) else {
+                // Try to parse error response
                 if let errorResponse = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                    let error = errorResponse["error"] as? [String: Any],
                    let message = error["message"] as? String {
-                    throw OpenAIError.apiError(message)
+                    print("❌ OpenAI API error (\(httpResponse.statusCode)): \(message)")
+                    throw OpenAIError.apiError("OpenAI API Error: \(message)")
+                } else {
+                    print("❌ OpenAI API returned status code: \(httpResponse.statusCode)")
+                    let responseString = String(data: data, encoding: .utf8) ?? "No response body"
+                    print("Response: \(responseString)")
+                    throw OpenAIError.apiError("OpenAI API returned status code: \(httpResponse.statusCode)")
                 }
-                throw OpenAIError.networkError(URLError(.badServerResponse))
             }
             
             guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                print("❌ Failed to decode OpenAI API response as JSON")
                 throw OpenAIError.decodingError
             }
             
+            print("✅ OpenAI API request successful")
             return json
+            
         } catch let error as OpenAIError {
             throw error
+        } catch let urlError as URLError {
+            print("❌ Network error: \(urlError.localizedDescription)")
+            switch urlError.code {
+            case .notConnectedToInternet:
+                throw OpenAIError.networkError(urlError)
+            case .timedOut:
+                throw OpenAIError.networkError(urlError)
+            case .cannotConnectToHost:
+                throw OpenAIError.networkError(urlError)
+            default:
+                throw OpenAIError.networkError(urlError)
+            }
         } catch {
+            print("❌ Unexpected error: \(error.localizedDescription)")
             throw OpenAIError.networkError(error)
         }
     }

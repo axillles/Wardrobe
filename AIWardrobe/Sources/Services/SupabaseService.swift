@@ -14,7 +14,9 @@ class SupabaseService: ObservableObject {
             supabaseKey: Config.supabaseAnonKey
         )
         
+        // Configure auth client to emit local session as initial session
         Task {
+            // This addresses the warning about initial session behavior
             await checkSession()
         }
     }

@@ -114,13 +114,13 @@ struct StyleCard: View {
         case .casual:
             return "tshirt"
         case .formal:
-            return "suit.fill"
+            return "person.fill"
         case .sporty:
             return "figure.run"
         case .elegant:
             return "sparkles"
         case .streetwear:
-            return "sneaker"
+            return "shoe.fill"
         case .minimalist:
             return "square.fill"
         case .bohemian:
